@@ -10,7 +10,13 @@
 
 Here're some of the project's best features:
 
-*   Data Collection: Retrieve user playlist and liked song data from Spotify. Audio Feature Analysis: Analyze audio features such as tempo energy and danceability to understand user preferences. Language Detection: Utilize natural language processing techniques to detect the language of track names for language-specific recommendations. Genre Filtering: Allow users to filter recommendations based on preferred music genres. Model Training: Train a machine learning model for language classification to enhance recommendation accuracy. Recommendation Generation: Generate personalized recommendations considering user preferences genre and language. User Interaction: Interact with the system via a command-line interface for seamless user experience.
+*   Data Collection: Retrieve user playlist and liked song data from Spotify.
+*   Audio Feature Analysis: Analyze audio features such as tempo energy and danceability to understand user preferences.
+*   Language Detection: Utilize natural language processing techniques to detect the language of track names for language-specific recommendations.
+*   Genre Filtering: Allow users to filter recommendations based on preferred music genres.
+*   Model Training: Train a machine learning model for language classification to enhance recommendation accuracy.
+*   Recommendation Generation: Generate personalized recommendations considering user preferences genre and language.
+*   User Interaction: Interact with the system via a command-line interface for seamless user experience.
 
 <h2>🛠️ Installation Steps:</h2>
 
