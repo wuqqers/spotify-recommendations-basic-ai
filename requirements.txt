@@ -1,0 +1,5 @@
+spotipy
+tensorflow
+scikit-learn
+pandas
+langdetect
