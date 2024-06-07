@@ -1,25 +1,28 @@
 import os
-import time
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import pandas as pd
 from langdetect import detect
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
-from tensorflow import keras
 from tensorflow.keras.models import load_model
 import json
+import random
+from dotenv import load_dotenv
 
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Spotify API credentials
-SPOTIPY_CLIENT_ID = 'SPOTIPY_CLIENT_ID'
-SPOTIPY_CLIENT_SECRET = 'SPOTIPY_CLIENT_SECRET'
-SPOTIPY_REDIRECT_URI = 'http://localhost:8888/callback/'
+SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+SPOTIPY_REDIRECT_URI = os.getenv('SPOTIPY_REDIRECT_URI')
 
 # Required scope
-scope = 'user-library-read playlist-read-private user-top-read'
+scope = 'user-library-read playlist-read-private user-top-read playlist-modify-private playlist-modify-public'
 
 # File to store recommended songs
 recommended_songs_file = "recommended_songs.json"
@@ -95,10 +98,10 @@ def train_model(training_data):
     scaler = MinMaxScaler()
     X_scaled = scaler.fit_transform(X)
 
-    model = keras.Sequential([
-        keras.layers.Dense(128, activation='relu', input_shape=(X_scaled.shape[1],)),
-        keras.layers.Dense(64, activation='relu'),
-        keras.layers.Dense(1, activation='sigmoid')  # For binary classification
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(128, activation='relu', input_shape=(X_scaled.shape[1],)),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(1, activation='sigmoid')  # For binary classification
     ])
 
     model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
@@ -123,6 +126,28 @@ def append_new_recommendations(recommendations_info):
 
     with open(recommended_songs_file, "w", encoding="utf-8") as f:
         json.dump(previous_recommendations, f, ensure_ascii=False, indent=4)
+
+def create_or_update_playlist(sp, playlist_name, track_ids):
+    user_id = sp.current_user()['id']
+    playlists = sp.current_user_playlists()
+    playlist = None
+    for item in playlists['items']:
+        if item['name'] == playlist_name:
+            playlist = item
+            break
+
+    if playlist:
+        sp.user_playlist_replace_tracks(user_id, playlist['id'], track_ids)
+        print(f"Updated playlist '{playlist_name}' with recommended songs.")
+    else:
+        sp.user_playlist_create(user_id, playlist_name, public=False)
+        playlists = sp.current_user_playlists()
+        for item in playlists['items']:
+            if item['name'] == playlist_name:
+                playlist = item
+                break
+        sp.user_playlist_add_tracks(user_id, playlist['id'], track_ids)
+        print(f"Created playlist '{playlist_name}' with recommended songs.")
 
 def main():
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(client_id=SPOTIPY_CLIENT_ID,
@@ -150,10 +175,13 @@ def main():
     liked_songs = get_liked_songs(sp)
 
     filter_genre = input("Do you want to filter recommendations by genre? (yes/no): ").lower()
+    genre_filter = None
     if filter_genre == 'yes':
         genre_filter = input("Enter a genre (e.g., Rock, Pop, HipHop): ").lower()
-    else:
-        genre_filter = None
+        valid_genres = sp.recommendation_genre_seeds()['genres']
+        if genre_filter not in valid_genres:
+            print(f"Invalid genre '{genre_filter}'. Please choose from the following: {valid_genres}")
+            return
 
     filter_language = input("Do you want to filter recommendations by language? (yes/no): ").lower()
 
@@ -169,8 +197,10 @@ def main():
 
     if filter_language == 'yes':
         language_filter = input("Enter 'tr' for Turkish or 'en' for English: ").lower()
+        market_filter = 'TR' if language_filter == 'tr' else 'US'
     else:
         language_filter = None
+        market_filter = None
 
     try:
         model = load_model("language_model.h5")
@@ -179,15 +209,54 @@ def main():
         print(f"Error: {e}")
         model = train_model(training_data)
 
-    # Limit seed tracks to 5
-    seed_tracks = track_ids[:5]
+    # Ensure seed tracks are selected from the dataset
+    seed_tracks = df['id'].tolist()
+
+    # Filter tracks by selected genre and language if necessary
+    if genre_filter:
+        filtered_tracks = []
+        for track_id in seed_tracks:
+            track_info = sp.track(track_id)
+            artist_id = track_info['artists'][0]['id']
+            artist_info = sp.artist(artist_id)
+            artist_genres = artist_info['genres']
+            if genre_filter in artist_genres:
+                filtered_tracks.append(track_id)
+        seed_tracks = filtered_tracks
+
+    if language_filter:
+        language_filtered_tracks = []
+        for track_id in seed_tracks:
+            track = sp.track(track_id)
+            track_name = track['name']
+            track_language = detect(track_name)
+            if track_language == language_filter:
+                language_filtered_tracks.append(track_id)
+        seed_tracks = language_filtered_tracks
+
+    # Rastgele seçim işlemi
+    if len(seed_tracks) > 5:
+        seed_tracks = random.sample(seed_tracks, 5)
+    else:
+        seed_tracks = seed_tracks[:5]
+
+    # Print parameters for debugging
+    print(f"Requesting recommendations with seed_tracks={seed_tracks}, genre_filter={genre_filter}, language_filter={language_filter}")
+
+    # Ensure seed_genres and seed_tracks are lists
+    params = {
+        'seed_tracks': seed_tracks,
+        'limit': 50,
+        'market': market_filter  # Set the market based on language filter
+    }
+    if genre_filter:
+        params['seed_genres'] = [genre_filter]
+
+    # Print the parameters to verify the format
+    print(f"Params for recommendations request: {params}")
 
     try:
-        if genre_filter:
-            recommendations = sp.recommendations(seed_genres=[genre_filter], limit=50)
-        else:
-            recommendations = sp.recommendations(seed_tracks=seed_tracks, limit=50)
-        
+        recommendations = sp.recommendations(**params)
         recommended_tracks = [track['id'] for track in recommendations['tracks']]
     except spotipy.SpotifyException as e:
         print(f"Error fetching recommendations: {e}")
@@ -204,26 +273,22 @@ def main():
     for rec_id, prediction in zip(recommended_tracks, predictions):
         try:
             if prediction > 0.5:
-                track_info = sp.track(rec_id)
-                track_name = track_info['name']
-                artist_name = track_info['artists'][0]['name']
-                language = detect(track_name)
-                if (not language_filter or language == language_filter) and (not genre_filter or genre_filter in track_info.get('genres', [])):
-                    filtered_recommendations_info.append((track_name, artist_name))
+                track = sp.track(rec_id)
+                track_name = track['name']
+                artist_name = track['artists'][0]['name']
+                filtered_recommendations_info.append((track_name, artist_name))
+                print(f"{track_name} by {artist_name}")
         except spotipy.SpotifyException as e:
-            print(f"Error: {e}")
-
-    print("\nRecommended Songs:")
-
-    if not os.path.exists(recommended_songs_file):
-        with open(recommended_songs_file, "w", encoding="utf-8") as f:
-            json.dump({"new_recommendations": []}, f)
+            print(f"Error: {e}. Track ID: {rec_id}")
+            continue
 
     append_new_recommendations(filtered_recommendations_info)
 
-    for rec_info in filtered_recommendations_info:
-        track_info = f"{rec_info[0]} - {rec_info[1]}"
-        print(track_info)
+    create_playlist = input("Do you want to create or update the 'recommendations-basic-ai-playlist' with the recommended songs? (yes/no): ").lower()
 
-if __name__ == '__main__':
+    if create_playlist == 'yes':
+        recommended_track_ids = [sp.search(f"{track[0]} {track[1]}", limit=1)['tracks']['items'][0]['id'] for track in filtered_recommendations_info]
+        create_or_update_playlist(sp, 'recommendations-basic-ai-playlist', recommended_track_ids)
+
+if __name__ == "__main__":
     main()

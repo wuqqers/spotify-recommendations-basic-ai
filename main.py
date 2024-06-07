@@ -5,7 +5,8 @@ import pandas as pd
 from langdetect import detect
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
-from tensorflow.keras.models import load_model
+from tensorflow.keras.models import load_model, Sequential
+from tensorflow.keras.layers import Dense
 import json
 import random
 from dotenv import load_dotenv
@@ -91,23 +92,24 @@ def create_training_data(sp, track_ids):
         training_data.append(feature)
     return training_data
 
-def train_model(training_data):
+def train_model(training_data, model=None):
     df = pd.DataFrame(training_data)
     X = df.drop(['track_name', 'language', 'id', 'track_href', 'analysis_url', 'uri', 'type'], axis=1)
     y = df['language'].apply(lambda x: 1 if x == 'tr' else 0)  # Binary classification for Turkish and other languages
     scaler = MinMaxScaler()
     X_scaled = scaler.fit_transform(X)
 
-    model = tf.keras.Sequential([
-        tf.keras.layers.Dense(128, activation='relu', input_shape=(X_scaled.shape[1],)),
-        tf.keras.layers.Dense(64, activation='relu'),
-        tf.keras.layers.Dense(1, activation='sigmoid')  # For binary classification
-    ])
+    if model is None:
+        model = Sequential([
+            Dense(128, activation='relu', input_shape=(X_scaled.shape[1],)),
+            Dense(64, activation='relu'),
+            Dense(1, activation='sigmoid')  # For binary classification
+        ])
+        model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
-    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-    model.fit(X_scaled, y, epochs=10, batch_size=32)
+    model.fit(X_scaled, y, epochs=10, batch_size=32, verbose=2)
 
-    model.save("language_model.h5")
+    model.save("language_model.keras")
     return model
 
 def append_new_recommendations(recommendations_info):
@@ -137,9 +139,11 @@ def create_or_update_playlist(sp, playlist_name, track_ids):
             break
 
     if playlist:
-        sp.user_playlist_replace_tracks(user_id, playlist['id'], track_ids)
-        print(f"Updated playlist '{playlist_name}' with recommended songs.")
+        # If playlist exists, add tracks to the existing playlist
+        sp.user_playlist_add_tracks(user_id, playlist['id'], track_ids)
+        print(f"Added recommended songs to the existing playlist '{playlist_name}'.")
     else:
+        # If playlist doesn't exist, create a new playlist and add tracks
         sp.user_playlist_create(user_id, playlist_name, public=False)
         playlists = sp.current_user_playlists()
         for item in playlists['items']:
@@ -147,7 +151,7 @@ def create_or_update_playlist(sp, playlist_name, track_ids):
                 playlist = item
                 break
         sp.user_playlist_add_tracks(user_id, playlist['id'], track_ids)
-        print(f"Created playlist '{playlist_name}' with recommended songs.")
+        print(f"Created playlist '{playlist_name}' and added recommended songs.")
 
 def main():
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(client_id=SPOTIPY_CLIENT_ID,
@@ -166,11 +170,17 @@ def main():
         model = train_model(training_data)
     else:
         try:
-            model = load_model("language_model.h5")
+            model = load_model("language_model.keras")
             model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
         except:
             print("Error loading model or model not found. Please update the dataset first.")
             return
+
+        # Repeated training with the existing model
+        playlist_id = '5o7RjYinGfWcoF0miijZyI'
+        track_ids = get_playlist_tracks(sp, playlist_id)
+        training_data = create_training_data(sp, track_ids)
+        model = train_model(training_data, model)
 
     liked_songs = get_liked_songs(sp)
 
@@ -202,13 +212,6 @@ def main():
         language_filter = None
         market_filter = None
 
-    try:
-        model = load_model("language_model.h5")
-        model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-    except Exception as e:
-        print(f"Error: {e}")
-        model = train_model(training_data)
-
     # Ensure seed tracks are selected from the dataset
     seed_tracks = df['id'].tolist()
 
@@ -227,68 +230,28 @@ def main():
     if language_filter:
         language_filtered_tracks = []
         for track_id in seed_tracks:
-            track = sp.track(track_id)
-            track_name = track['name']
+            track_name = sp.track(track_id)['name']
             track_language = detect(track_name)
-            if track_language == language_filter:
+            if (language_filter == 'tr' and track_language == 'tr') or (language_filter == 'en' and track_language == 'en'):
                 language_filtered_tracks.append(track_id)
         seed_tracks = language_filtered_tracks
 
-    # Rastgele seçim işlemi
-    if len(seed_tracks) > 5:
-        seed_tracks = random.sample(seed_tracks, 5)
-    else:
-        seed_tracks = seed_tracks[:5]
-
-    # Print parameters for debugging
-    print(f"Requesting recommendations with seed_tracks={seed_tracks}, genre_filter={genre_filter}, language_filter={language_filter}")
-
-    # Ensure seed_genres and seed_tracks are lists
-    params = {
-        'seed_tracks': seed_tracks,
-        'limit': 50,
-        'market': market_filter  # Set the market based on language filter
-    }
-    if genre_filter:
-        params['seed_genres'] = [genre_filter]
-
-    # Print the parameters to verify the format
-    print(f"Params for recommendations request: {params}")
-
-    try:
-        recommendations = sp.recommendations(**params)
-        recommended_tracks = [track['id'] for track in recommendations['tracks']]
-    except spotipy.SpotifyException as e:
-        print(f"Error fetching recommendations: {e}")
+    if len(seed_tracks) < 5:
+        print("Not enough tracks to generate recommendations.")
         return
-    
-    scaler = MinMaxScaler()
-    features, _ = fetch_audio_features(sp, recommended_tracks)
-    X = pd.DataFrame(features).drop(['id', 'track_href', 'analysis_url', 'uri', 'type'], axis=1)
-    X = scaler.fit_transform(X)
-    predictions = model.predict(X)
-    filtered_recommendations = [track_id for track_id, prediction in zip(recommended_tracks, predictions) if prediction.any() > 0.5]
 
-    filtered_recommendations_info = []
-    for rec_id, prediction in zip(recommended_tracks, predictions):
-        try:
-            if prediction > 0.5:
-                track = sp.track(rec_id)
-                track_name = track['name']
-                artist_name = track['artists'][0]['name']
-                filtered_recommendations_info.append((track_name, artist_name))
-                print(f"{track_name} by {artist_name}")
-        except spotipy.SpotifyException as e:
-            print(f"Error: {e}. Track ID: {rec_id}")
-            continue
+    seed_tracks = random.sample(seed_tracks, 5)
 
-    append_new_recommendations(filtered_recommendations_info)
+    recommendations = sp.recommendations(seed_tracks=seed_tracks, limit=20, market=market_filter)
+    recommended_tracks = [track['id'] for track in recommendations['tracks']]
+    recommended_tracks_info = [(track['name'], track['artists'][0]['name']) for track in recommendations['tracks']]
+    recommended_songs = [track for track in recommended_tracks if track not in liked_songs]
 
-    create_playlist = input("Do you want to create or update the 'recommendations-basic-ai-playlist' with the recommended songs? (yes/no): ").lower()
-
-    if create_playlist == 'yes':
-        recommended_track_ids = [sp.search(f"{track[0]} {track[1]}", limit=1)['tracks']['items'][0]['id'] for track in filtered_recommendations_info]
-        create_or_update_playlist(sp, 'recommendations-basic-ai-playlist', recommended_track_ids)
+    if recommended_songs:
+        create_or_update_playlist(sp, "recommendations-basic-ai-playlist", recommended_songs)
+        append_new_recommendations(recommended_tracks_info)
+    else:
+        print("No new recommendations found. Try updating the dataset.")
 
 if __name__ == "__main__":
     main()
