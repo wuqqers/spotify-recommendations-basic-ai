@@ -98,6 +98,17 @@ def get_playlist_tracks(sp, playlist_id):
     print(f"Fetched {len(track_ids)} tracks from playlist {playlist_id}.")
     return track_ids
 
+def get_top_tracks(sp):
+    top_tracks = []
+    try:
+        results = sp.current_user_top_tracks(time_range='medium_term', limit=50)
+        top_tracks = [item['id'] for item in results['items']]
+    except spotipy.SpotifyException as e:
+        print(f"Error: {e}")
+
+    print(f"Fetched {len(top_tracks)} top tracks.")
+    return top_tracks
+
 def create_training_data(sp, track_ids):
     training_data = []
     features, track_names = fetch_audio_features(sp, track_ids)
@@ -192,6 +203,8 @@ def main():
     if update_dataset == 'yes':
         playlist_id = PLAYLIST_ID  # .env dosyasından gelen değeri kullanın
         track_ids = get_playlist_tracks(sp, playlist_id)
+        top_tracks = get_top_tracks(sp)  # Kullanıcının en çok dinlediği şarkıları ekleyin
+        track_ids.extend(top_tracks)
         features, track_names = fetch_audio_features(sp, track_ids)
         save_dataset(features, track_names)
         training_data = create_training_data(sp, track_ids)
@@ -208,6 +221,8 @@ def main():
         # Repeated training with the existing model
         playlist_id = PLAYLIST_ID  # .env dosyasından gelen değeri kullanın
         track_ids = get_playlist_tracks(sp, playlist_id)
+        top_tracks = get_top_tracks(sp)  # Kullanıcının en çok dinlediği şarkıları ekleyin
+        track_ids.extend(top_tracks)
         training_data = create_training_data(sp, track_ids)
         model = train_model(training_data, model)
 
@@ -284,4 +299,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
